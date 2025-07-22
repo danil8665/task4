@@ -1,21 +1,8 @@
 'use client';
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/components/auth-provider';
 import EventForm, { EventFormValues } from '@/components/EventForm';
-import { db } from '@/lib/firebase';
-import {
-  collection,
-  addDoc,
-  query,
-  where,
-  onSnapshot,
-  orderBy,
-  Timestamp,
-  deleteDoc,
-  doc,
-  updateDoc,
-} from 'firebase/firestore';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Calendar } from '@/components/ui/calendar';
@@ -37,15 +24,9 @@ import {
 import { signOut } from 'firebase/auth';
 import { auth } from '@/lib/firebase';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-
-interface EventItem {
-  id: string;
-  title: string;
-  date: string;
-  time: string;
-  description: string;
-  priority: string;
-}
+import { useEvents } from '@/hooks/useEvents';
+import EventCard from '@/components/EventCard';
+import { filterEvents } from '@/lib/utils';
 
 function getInitials(name: string) {
   return name
@@ -57,13 +38,10 @@ function getInitials(name: string) {
 export default function Home() {
   const { user, loading } = useAuth();
   const router = useRouter();
-  const [events, setEvents] = useState<EventItem[]>([]);
-  const [saving, setSaving] = useState(false);
-  const [eventsLoading, setEventsLoading] = useState(true);
   const [calendarDate, setCalendarDate] = useState<Date | undefined>(new Date());
   const [formOpen, setFormOpen] = useState(false);
   const [formDate, setFormDate] = useState<Date | undefined>(undefined);
-  const [editEvent, setEditEvent] = useState<EventItem | null>(null);
+  const [editEvent, setEditEvent] = useState<any | null>(null);
   const [deleteEventId, setDeleteEventId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState<string>('all');
@@ -71,51 +49,30 @@ export default function Home() {
   const displayName = user?.displayName || 'Користувач';
   const initials = getInitials(displayName);
 
+  const {
+    events,
+    loading: eventsLoading,
+    addEvent,
+    updateEvent,
+    deleteEvent,
+  } = useEvents(user?.uid);
+  const [saving, setSaving] = useState(false);
+
   useEffect(() => {
     if (!loading && !user) {
       router.replace('/auth');
     }
   }, [user, loading, router]);
 
-  useEffect(() => {
-    if (!user) return;
-    setEventsLoading(true);
-    const q = query(
-      collection(db, 'events'),
-      where('userId', '==', user.uid),
-      orderBy('date', 'asc'),
-    );
-    const unsub = onSnapshot(q, (snap) => {
-      setEvents(snap.docs.map((d) => ({ id: d.id, ...d.data() }) as EventItem));
-      setEventsLoading(false);
-    });
-    return () => unsub();
-  }, [user]);
-
   const handleAddEvent = async (values: EventFormValues) => {
     if (!user) return;
     setSaving(true);
     try {
       if (editEvent) {
-        const ref = doc(db, 'events', editEvent.id);
-        await updateDoc(ref, {
-          title: values.title,
-          date: values.date?.toISOString().slice(0, 10),
-          time: values.time,
-          description: values.description,
-          priority: values.priority,
-        });
+        await updateEvent(editEvent.id, values);
         setEditEvent(null);
       } else {
-        await addDoc(collection(db, 'events'), {
-          userId: user.uid,
-          title: values.title,
-          date: values.date?.toISOString().slice(0, 10),
-          time: values.time,
-          description: values.description,
-          priority: values.priority,
-          createdAt: Timestamp.now(),
-        });
+        await addEvent(values);
         setFormOpen(false);
       }
     } finally {
@@ -125,13 +82,19 @@ export default function Home() {
 
   const handleDelete = async () => {
     if (!deleteEventId) return;
-    await deleteDoc(doc(db, 'events', deleteEventId));
+    await deleteEvent(deleteEventId);
     setDeleteEventId(null);
   };
 
   const handleSignOut = async () => {
     await signOut(auth);
     router.replace('/auth');
+  };
+
+  const priorityLabels: Record<string, string> = {
+    normal: 'Звичайна',
+    important: 'Важлива',
+    critical: 'Критична',
   };
 
   const eventDates: Record<string, string> = {};
@@ -150,25 +113,12 @@ export default function Home() {
       .filter((date) => eventDates[date] === 'critical')
       .map((date) => new Date(date)),
   };
-  const priorityLabels: Record<string, string> = {
-    normal: 'Звичайна',
-    important: 'Важлива',
-    critical: 'Критична',
-  };
   const modifiersClassNames = {
     normal: 'bg-gray-200 text-gray-700 border border-gray-300 rounded-md',
     important: 'bg-yellow-200 text-yellow-900 border border-yellow-400 rounded-md',
     critical: 'bg-red-200 text-red-900 border border-red-400 rounded-md',
     today: 'opacity-60',
   };
-
-  const filteredEvents = events.filter((ev) => {
-    const matchesText =
-      ev.title.toLowerCase().includes(search.toLowerCase()) ||
-      ev.description?.toLowerCase().includes(search.toLowerCase());
-    const matchesStatus = status === 'all' ? true : ev.priority === status;
-    return matchesText && matchesStatus;
-  });
 
   if (loading) {
     return (
@@ -267,48 +217,18 @@ export default function Home() {
               <Skeleton className="h-20 w-full mb-4" />
               <Skeleton className="h-20 w-full mb-4" />
             </>
-          ) : filteredEvents.length === 0 ? (
+          ) : filterEvents({ events, search, status }).length === 0 ? (
             <div className="text-gray-500">Подій не знайдено</div>
           ) : (
             <ul className="space-y-4">
-              {filteredEvents.map((ev) => (
-                <li
+              {filterEvents({ events, search, status }).map((ev) => (
+                <EventCard
                   key={ev.id}
-                  className="bg-white rounded-lg border border-gray-200 p-4 flex flex-col gap-1 transition-transform duration-200 will-change-transform hover:scale-[1.025] cursor-pointer"
-                >
-                  <div className="flex justify-between items-center">
-                    <span className="font-bold text-gray-800">Подія: {ev.title}</span>
-                    <span
-                      className={`text-xs px-2 py-1 rounded font-semibold
-                      ${ev.priority === 'normal' ? 'bg-gray-400 text-white' : ''}
-                      ${ev.priority === 'important' ? 'bg-yellow-500 text-white' : ''}
-                      ${ev.priority === 'critical' ? 'bg-red-500 text-white' : ''}
-                    `}
-                    >
-                      {priorityLabels[ev.priority]}
-                    </span>
-                  </div>
-                  {ev.description && (
-                    <div className="text-sm mt-1 text-gray-700">Опис: {ev.description}</div>
-                  )}
-                  <div className="text-sm text-gray-500">
-                    Дата: {ev.date} Час: {ev.time}
-                  </div>
-                  <div className="flex gap-2 mt-2 self-end">
-                    <button
-                      onClick={() => setEditEvent(ev)}
-                      className="text-blue-600 text-xs px-2 py-1 rounded hover:bg-blue-50 transition"
-                    >
-                      Редагувати
-                    </button>
-                    <button
-                      onClick={() => setDeleteEventId(ev.id)}
-                      className="text-red-600 text-xs px-2 py-1 rounded hover:bg-red-50 transition"
-                    >
-                      Видалити
-                    </button>
-                  </div>
-                </li>
+                  event={ev}
+                  onEdit={setEditEvent}
+                  onDelete={setDeleteEventId}
+                  priorityLabels={priorityLabels}
+                />
               ))}
             </ul>
           )}
